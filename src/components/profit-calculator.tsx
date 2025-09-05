@@ -249,8 +249,17 @@ export default function ProfitCalculator() {
     const margin = (profit / revenueExVat) * 100
     const isUnprofitable = margin < target
     
-    // Calculate suggested price to meet target margin (accounting for {currentCountry.taxName} properly)
-    const suggestedPrice = (cost + shippingCost + platformFeesExVat) / (1 - target/100 - (vat/(100+vat)) + (cost*vat/(100+vat))/selling)
+    // Calculate suggested price to meet target margin
+    // If current margin matches target (within 0.1%), return current price to avoid rounding errors
+    let suggestedPrice
+    if (Math.abs(margin - target) < 0.1) {
+      suggestedPrice = selling
+    } else {
+      // Simple approximation: Required Revenue = Total Costs / (1 - target margin)
+      // Then convert back to selling price including tax
+      const requiredRevenueExVat = totalCosts / (1 - target/100)
+      suggestedPrice = requiredRevenueExVat * (1 + vat/100)
+    }
 
     setCalculation({
       sellingPrice: selling,
