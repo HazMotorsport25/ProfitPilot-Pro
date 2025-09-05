@@ -8,12 +8,14 @@ import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { AlertTriangle, Calculator, DollarSign } from "lucide-react"
+import { Checkbox } from "@/components/ui/checkbox"
+import { AlertTriangle, Calculator, Package } from "lucide-react"
 
 interface ProfitCalculation {
   sellingPrice: number
   costPrice: number
   shippingCost: number
+  shippingCharged: number
   vatRate: number
   targetMargin: number
   platform: string
@@ -22,8 +24,8 @@ interface ProfitCalculation {
   profitMargin: number
   isUnprofitable: boolean
   suggestedPrice: number
-  vatPaid: number
-  vatClaimed: number
+  vatOnExpenses: number
+  vatOnSales: number
   vatToPay: number
 }
 
@@ -39,15 +41,21 @@ const COURIERS = [
 const PLATFORMS = {
   ebay: {
     name: "eBay",
-    feeRate: 12, // 12% total fees
-    paypalRate: 0,
-    fixedFee: 0
+    finalValueFeeRate: 8.9, // Final value fee % (realistic)
+    topRatedDiscount: 10, // Top-rated seller discount %
+    regulatoryFeeRate: 0.35, // Regulatory operating fee %
+    promotedListingsRate: 2.2, // Promoted listings ad rate %
+    fixedFee: 0.30, // Per order fixed fee
+    paypalRate: 0
   },
   shopify: {
     name: "Shopify",
-    feeRate: 3, // 3% total fees
-    paypalRate: 0,
-    fixedFee: 0
+    finalValueFeeRate: 3, // Transaction fee %
+    topRatedDiscount: 0,
+    regulatoryFeeRate: 0,
+    promotedListingsRate: 0,
+    fixedFee: 0,
+    paypalRate: 0
   }
 }
 
@@ -56,9 +64,13 @@ export default function ProfitCalculator() {
   const [costPrice, setCostPrice] = useState<string>("")
   const [costIncludesVat, setCostIncludesVat] = useState<boolean>(true)
   const [selectedCourier, setSelectedCourier] = useState<string>("")
+  const [shippingCharged, setShippingCharged] = useState<string>("")
+  const [freeShipping, setFreeShipping] = useState<boolean>(false)
   const [selectedPlatform, setSelectedPlatform] = useState<string>("ebay")
   const [vatRate, setVatRate] = useState<string>("20")
   const [targetMargin, setTargetMargin] = useState<string>("30")
+  const [topRatedSeller, setTopRatedSeller] = useState<boolean>(false)
+  const [promotedListings, setPromotedListings] = useState<boolean>(false)
   const [calculation, setCalculation] = useState<ProfitCalculation | null>(null)
 
   const calculateProfit = () => {
@@ -68,53 +80,89 @@ export default function ProfitCalculator() {
     const platform = PLATFORMS[selectedPlatform as keyof typeof PLATFORMS]
     const vat = parseFloat(vatRate)
     const target = parseFloat(targetMargin)
+    const shippingChargedAmount = freeShipping ? 0 : parseFloat(shippingCharged) || 0
 
     if (!selling || !cost || !courier || !platform || !vat || !target) {
       return
     }
 
-    const shipping = courier.cost
+    const shippingCost = courier.cost // What seller pays courier
     
     // Calculate VAT breakdown
-    const vatClaimedOnSale = (selling * vat) / (100 + vat) // VAT collected on sale (output VAT)
-    const vatClaimedOnShipping = (shipping * vat) / (100 + vat) // VAT collected on shipping (output VAT)
-    const vatClaimed = vatClaimedOnSale + vatClaimedOnShipping
+    const vatOnSalesAmount = (selling * vat) / (100 + vat) // VAT collected on product sales
+    const vatOnShippingChargedAmount = (shippingChargedAmount * vat) / (100 + vat) // VAT collected on shipping charged to customer
+    const vatOnSales = vatOnSalesAmount + vatOnShippingChargedAmount // Total VAT collected
     
-    // Calculate VAT paid on cost price depending on whether cost includes VAT
-    const vatPaidOnCost = costIncludesVat 
+    // Calculate VAT on expenses (what you can claim back)
+    const vatOnCostExpenses = costIncludesVat 
       ? (cost * vat) / (100 + vat) // Extract VAT from inclusive price
       : (cost * vat) / 100 // Calculate VAT on exclusive price
+    const vatOnShippingExpenses = (shippingCost * vat) / (100 + vat) // VAT paid on courier costs
+    const vatOnExpenses = vatOnCostExpenses + vatOnShippingExpenses
     
-    const vatToPay = vatClaimed - vatPaidOnCost // Net VAT owed to HMRC
+    // Calculate platform fees using eBay's structure
+    let platformFeesExVat = 0
+    if (selectedPlatform === 'ebay') {
+      // Final Value Fee
+      let finalValueFee = (selling * platform.finalValueFeeRate / 100)
+      
+      // Top-rated seller discount (if applicable)
+      if (topRatedSeller) {
+        const discount = finalValueFee * (platform.topRatedDiscount / 100)
+        finalValueFee -= discount
+      }
+      
+      // Regulatory operating fee
+      const regulatoryFee = selling * (platform.regulatoryFeeRate / 100)
+      
+      // Promoted listings fee (if applicable)
+      const promotedListingsFee = promotedListings ? (selling * platform.promotedListingsRate / 100) : 0
+      
+      // Fixed fee per order
+      const fixedFee = platform.fixedFee
+      
+      platformFeesExVat = finalValueFee + regulatoryFee + promotedListingsFee + fixedFee
+    } else {
+      // Shopify or other platforms use simple percentage
+      platformFeesExVat = (selling * platform.finalValueFeeRate / 100) + platform.fixedFee
+    }
     
-    // Calculate platform fees
-    const platformFeeRate = platform.feeRate + platform.paypalRate
-    const platformFees = (selling * platformFeeRate / 100) + platform.fixedFee
+    const vatOnPlatformFees = (platformFeesExVat * vat) / 100 // VAT added on top of the fee
+    const platformFeesIncVat = platformFeesExVat + vatOnPlatformFees
+    
+    // Update VAT on expenses to include platform fees VAT
+    const totalVatOnExpenses = vatOnExpenses + vatOnPlatformFees
+    const vatToPay = vatOnSales - totalVatOnExpenses // Net VAT owed to HMRC
     
     // Use cost excluding VAT for total calculation (since VAT is handled separately)
-    const costExVat = costIncludesVat ? cost - vatPaidOnCost : cost
-    const totalCosts = costExVat + shipping + platformFees + vatToPay
-    const profit = selling - totalCosts
-    const margin = (profit / selling) * 100
+    const costExVat = costIncludesVat ? cost - vatOnCostExpenses : cost
+    const shippingCostExVat = shippingCost - vatOnShippingExpenses // Courier costs are Inc VAT, so exclude VAT for cost calculation
+    const totalCosts = costExVat + shippingCostExVat + platformFeesExVat + vatToPay
+    
+    // Revenue should exclude VAT for profit calculation (VAT is not profit, it's collected for HMRC)
+    const revenueExVat = selling - vatOnSalesAmount + (shippingChargedAmount - vatOnShippingChargedAmount)
+    const profit = revenueExVat - totalCosts
+    const margin = (profit / revenueExVat) * 100
     const isUnprofitable = margin < target
     
     // Calculate suggested price to meet target margin (accounting for VAT properly)
-    const suggestedPrice = (cost + shipping + platformFees) / (1 - target/100 - (vat/(100+vat)) + (cost*vat/(100+vat))/selling)
+    const suggestedPrice = (cost + shippingCost + platformFeesExVat) / (1 - target/100 - (vat/(100+vat)) + (cost*vat/(100+vat))/selling)
 
     setCalculation({
       sellingPrice: selling,
       costPrice: cost,
-      shippingCost: shipping,
+      shippingCost: shippingCost,
+      shippingCharged: shippingChargedAmount,
       vatRate: vat,
       targetMargin: target,
       platform: platform.name,
-      platformFees,
+      platformFees: platformFeesExVat,
       profitAmount: profit,
       profitMargin: margin,
       isUnprofitable,
       suggestedPrice,
-      vatPaid: vatPaidOnCost,
-      vatClaimed,
+      vatOnExpenses: totalVatOnExpenses,
+      vatOnSales,
       vatToPay
     })
   }
@@ -124,9 +172,13 @@ export default function ProfitCalculator() {
     setCostPrice("")
     setCostIncludesVat(true)
     setSelectedCourier("")
+    setShippingCharged("")
+    setFreeShipping(false)
     setSelectedPlatform("ebay")
     setVatRate("20")
     setTargetMargin("30")
+    setTopRatedSeller(false)
+    setPromotedListings(false)
     setCalculation(null)
   }
 
@@ -147,7 +199,7 @@ export default function ProfitCalculator() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <DollarSign className="w-5 h-5" />
+              <Package className="w-5 h-5" />
               Product Details
             </CardTitle>
             <CardDescription>
@@ -205,6 +257,30 @@ export default function ProfitCalculator() {
                   ))}
                 </SelectContent>
               </Select>
+              {selectedPlatform === 'ebay' && (
+                <div className="space-y-2 mt-2">
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="topRatedSeller"
+                      checked={topRatedSeller}
+                      onCheckedChange={(checked) => setTopRatedSeller(checked as boolean)}
+                    />
+                    <Label htmlFor="topRatedSeller" className="text-sm font-normal">
+                      Top-rated seller (10% discount on final value fee)
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="promotedListings"
+                      checked={promotedListings}
+                      onCheckedChange={(checked) => setPromotedListings(checked as boolean)}
+                    />
+                    <Label htmlFor="promotedListings" className="text-sm font-normal">
+                      Promoted listings (2.2% advertising fee)
+                    </Label>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -221,6 +297,29 @@ export default function ProfitCalculator() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="shippingCharged">Shipping Charged to Customer (£) - Inc VAT</Label>
+              <Input
+                id="shippingCharged"
+                type="number"
+                step="0.01"
+                placeholder="4.99"
+                value={shippingCharged}
+                onChange={(e) => setShippingCharged(e.target.value)}
+                disabled={freeShipping}
+              />
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="freeShipping"
+                  checked={freeShipping}
+                  onCheckedChange={(checked) => setFreeShipping(checked as boolean)}
+                />
+                <Label htmlFor="freeShipping" className="text-sm font-normal">
+                  Free shipping (no charge to customer)
+                </Label>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -282,14 +381,14 @@ export default function ProfitCalculator() {
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <p className="text-sm font-medium text-gray-500">Selling Price</p>
-                    <p className="text-2xl font-bold">£{calculation.sellingPrice.toFixed(2)}</p>
+                    <p className="text-sm font-medium text-gray-500">Revenue (Ex VAT)</p>
+                    <p className="text-2xl font-bold text-green-600">£{(calculation.sellingPrice - calculation.vatOnSales + calculation.shippingCharged - ((calculation.shippingCharged * calculation.vatRate) / (100 + calculation.vatRate))).toFixed(2)}</p>
                   </div>
 
                   <div className="space-y-2">
                     <p className="text-sm font-medium text-gray-500">Total Costs</p>
                     <p className="text-2xl font-bold text-red-600">
-                      £{((costIncludesVat ? calculation.costPrice - calculation.vatPaid : calculation.costPrice) + calculation.shippingCost + calculation.platformFees + calculation.vatToPay).toFixed(2)}
+                      £{((costIncludesVat ? calculation.costPrice - calculation.vatOnExpenses : calculation.costPrice) + (calculation.shippingCost - ((calculation.shippingCost * calculation.vatRate) / (100 + calculation.vatRate))) + calculation.platformFees + calculation.vatToPay).toFixed(2)}
                     </p>
                   </div>
 
@@ -318,14 +417,18 @@ export default function ProfitCalculator() {
                   <div className="space-y-1 text-sm">
                     <div className="flex justify-between">
                       <span className="text-gray-600">Product Cost (Ex VAT):</span>
-                      <span>£{(costIncludesVat ? calculation.costPrice - calculation.vatPaid : calculation.costPrice).toFixed(2)}</span>
+                      <span>£{(costIncludesVat ? calculation.costPrice - calculation.vatOnExpenses : calculation.costPrice).toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-600">Shipping Cost:</span>
-                      <span>£{calculation.shippingCost.toFixed(2)}</span>
+                      <span className="text-gray-600">Shipping Cost (Ex VAT):</span>
+                      <span>£{(calculation.shippingCost - ((calculation.shippingCost * calculation.vatRate) / (100 + calculation.vatRate))).toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-600">{calculation.platform} Fees:</span>
+                      <span className="text-gray-600">Shipping Revenue:</span>
+                      <span className="text-green-600">+£{calculation.shippingCharged.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">{calculation.platform} Fees (Ex VAT):</span>
                       <span>£{calculation.platformFees.toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between">
@@ -339,15 +442,15 @@ export default function ProfitCalculator() {
                   <h4 className="font-semibold text-gray-900">VAT Breakdown:</h4>
                   <div className="space-y-1 text-sm">
                     <div className="flex justify-between">
-                      <span className="text-gray-600">VAT Claimed (Output VAT):</span>
-                      <span className="text-green-600">£{calculation.vatClaimed.toFixed(2)}</span>
+                      <span className="text-gray-600">VAT on Sales (Output VAT):</span>
+                      <span className="text-red-600">£{calculation.vatOnSales.toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-600">VAT Paid (Input VAT):</span>
-                      <span className="text-red-600">£{calculation.vatPaid.toFixed(2)}</span>
+                      <span className="text-gray-600">VAT on Expenses (Input VAT):</span>
+                      <span className="text-green-600">£{calculation.vatOnExpenses.toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between border-t pt-1 font-semibold">
-                      <span className="text-gray-900">Net VAT to Pay:</span>
+                      <span className="text-gray-900">Net VAT to Pay HMRC:</span>
                       <span className={calculation.vatToPay >= 0 ? "text-red-600" : "text-green-600"}>
                         £{calculation.vatToPay.toFixed(2)}
                       </span>
@@ -356,48 +459,144 @@ export default function ProfitCalculator() {
                 </div>
 
                 <div className="border-t pt-4">
-                  <h4 className="font-semibold text-gray-900 mb-2">Calculation Steps:</h4>
-                  <div className="bg-gray-50 p-3 rounded-lg text-sm space-y-1">
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Selling Price:</span>
-                      <span className="font-mono">£{calculation.sellingPrice.toFixed(2)}</span>
+                  <h4 className="font-semibold text-gray-900 mb-3">Detailed Calculation Breakdown</h4>
+                  <div className="bg-gray-50 p-4 rounded-lg text-sm space-y-4">
+                    
+                    {/* Revenue Section */}
+                    <div>
+                      <h5 className="font-semibold text-gray-800 mb-2 text-base">📈 Revenue Calculation</h5>
+                      <div className="space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Selling Price (Inc VAT):</span>
+                          <span className="font-mono">£{calculation.sellingPrice.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">VAT on Sales:</span>
+                          <span className="font-mono">£{calculation.sellingPrice.toFixed(2)} × {calculation.vatRate}% ÷ 120% = £{((calculation.sellingPrice * calculation.vatRate) / (100 + calculation.vatRate)).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Shipping Charged to Customer:</span>
+                          <span className="font-mono">£{calculation.shippingCharged.toFixed(2)}</span>
+                        </div>
+                        {calculation.shippingCharged > 0 && (
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">VAT on Shipping Charged:</span>
+                            <span className="font-mono">£{calculation.shippingCharged.toFixed(2)} × {calculation.vatRate}% ÷ 120% = £{((calculation.shippingCharged * calculation.vatRate) / (100 + calculation.vatRate)).toFixed(2)}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between border-t pt-1 font-medium">
+                          <span className="text-gray-800">Revenue (Ex VAT):</span>
+                          <span className="font-mono">£{(calculation.sellingPrice - calculation.vatOnSales + calculation.shippingCharged - ((calculation.shippingCharged * calculation.vatRate) / (100 + calculation.vatRate))).toFixed(2)}</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">VAT Claimed (Sales):</span>
-                      <span className="font-mono">£{calculation.sellingPrice.toFixed(2)} × {calculation.vatRate}% ÷ 120% = £{((calculation.sellingPrice * calculation.vatRate) / (100 + calculation.vatRate)).toFixed(2)}</span>
+
+                    {/* Platform Fees Section */}
+                    <div>
+                      <h5 className="font-semibold text-gray-800 mb-2 text-base">🏪 {calculation.platform} Fees Breakdown</h5>
+                      {selectedPlatform === 'ebay' ? (
+                        <div className="space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Final Value Fee (8.9%):</span>
+                            <span className="font-mono">£{calculation.sellingPrice.toFixed(2)} × 8.9% = £{(calculation.sellingPrice * 8.9 / 100).toFixed(2)}</span>
+                          </div>
+                          {topRatedSeller && (
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Top-rated seller discount (10%):</span>
+                              <span className="font-mono">£{(calculation.sellingPrice * 8.9 / 100).toFixed(2)} × 10% = -£{((calculation.sellingPrice * 8.9 / 100) * 0.1).toFixed(2)}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Regulatory operating fee (0.35%):</span>
+                            <span className="font-mono">£{calculation.sellingPrice.toFixed(2)} × 0.35% = £{(calculation.sellingPrice * 0.35 / 100).toFixed(2)}</span>
+                          </div>
+                          {promotedListings && (
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Promoted listings fee (2.2%):</span>
+                              <span className="font-mono">£{calculation.sellingPrice.toFixed(2)} × 2.2% = £{(calculation.sellingPrice * 2.2 / 100).toFixed(2)}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Fixed fee per order:</span>
+                            <span className="font-mono">£0.30</span>
+                          </div>
+                          <div className="flex justify-between border-t pt-1 font-medium">
+                            <span className="text-gray-800">Total eBay Fees (Ex VAT):</span>
+                            <span className="font-mono">£{calculation.platformFees.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">VAT on Platform Fees (20%):</span>
+                            <span className="font-mono">£{calculation.platformFees.toFixed(2)} × 20% = £{(calculation.platformFees * calculation.vatRate / 100).toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between font-medium">
+                            <span className="text-gray-800">Total eBay Fees (Inc VAT):</span>
+                            <span className="font-mono">£{(calculation.platformFees + (calculation.platformFees * calculation.vatRate / 100)).toFixed(2)}</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">{calculation.platform} Transaction Fees:</span>
+                            <span className="font-mono">£{calculation.platformFees.toFixed(2)}</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">VAT Claimed (Shipping):</span>
-                      <span className="font-mono">£{calculation.shippingCost.toFixed(2)} × {calculation.vatRate}% ÷ 120% = £{((calculation.shippingCost * calculation.vatRate) / (100 + calculation.vatRate)).toFixed(2)}</span>
+
+                    {/* VAT Summary Section */}
+                    <div>
+                      <h5 className="font-semibold text-gray-800 mb-2 text-base">🧾 VAT Summary</h5>
+                      <div className="space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">VAT on Sales (Output VAT):</span>
+                          <span className="font-mono text-red-600">£{calculation.vatOnSales.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">VAT on Product Cost (Input VAT):</span>
+                          <span className="font-mono text-green-600">£{(costIncludesVat ? (calculation.costPrice * calculation.vatRate) / (100 + calculation.vatRate) : (calculation.costPrice * calculation.vatRate) / 100).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">VAT on Shipping Cost (Input VAT):</span>
+                          <span className="font-mono text-green-600">£{((calculation.shippingCost * calculation.vatRate) / (100 + calculation.vatRate)).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">VAT on Platform Fees (Input VAT):</span>
+                          <span className="font-mono text-green-600">£{(calculation.platformFees * calculation.vatRate / 100).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between border-t pt-1 font-medium">
+                          <span className="text-gray-800">Total Input VAT (Claimable):</span>
+                          <span className="font-mono text-green-600">£{calculation.vatOnExpenses.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between font-medium">
+                          <span className="text-gray-800">Net VAT to Pay HMRC:</span>
+                          <span className={`font-mono ${calculation.vatToPay >= 0 ? "text-red-600" : "text-green-600"}`}>£{calculation.vatToPay.toFixed(2)}</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Total VAT Claimed:</span>
-                      <span className="font-mono">£{calculation.vatClaimed.toFixed(2)}</span>
+
+                    {/* Final Calculation Section */}
+                    <div>
+                      <h5 className="font-semibold text-gray-800 mb-2 text-base">💰 Profit Calculation</h5>
+                      <div className="space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Revenue (Ex VAT):</span>
+                          <span className="font-mono">£{(calculation.sellingPrice - calculation.vatOnSales + calculation.shippingCharged - ((calculation.shippingCharged * calculation.vatRate) / (100 + calculation.vatRate))).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Total Business Costs:</span>
+                          <span className="font-mono">£{((costIncludesVat ? calculation.costPrice - calculation.vatOnExpenses : calculation.costPrice) + (calculation.shippingCost - ((calculation.shippingCost * calculation.vatRate) / (100 + calculation.vatRate))) + calculation.platformFees + calculation.vatToPay).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between border-t pt-1 font-bold text-base">
+                          <span className="text-gray-900">Net Profit:</span>
+                          <span className={`font-mono ${calculation.profitAmount >= 0 ? 'text-green-600' : 'text-red-600'}`}>£{calculation.profitAmount.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between font-bold text-base">
+                          <span className="text-gray-900">Profit Margin:</span>
+                          <span className={`font-mono ${calculation.profitMargin >= calculation.targetMargin ? 'text-green-600' : 'text-red-600'}`}>{calculation.profitMargin.toFixed(2)}%</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">VAT Paid (Cost):</span>
-                      <span className="font-mono">{costIncludesVat ? `£${calculation.costPrice.toFixed(2)} × ${calculation.vatRate}% ÷ 120%` : `£${calculation.costPrice.toFixed(2)} × ${calculation.vatRate}%`} = £{calculation.vatPaid.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Net VAT:</span>
-                      <span className="font-mono">£{calculation.vatClaimed.toFixed(2)} - £{calculation.vatPaid.toFixed(2)} = £{calculation.vatToPay.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">{calculation.platform} Fees:</span>
-                      <span className="font-mono">£{calculation.platformFees.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Total Costs:</span>
-                      <span className="font-mono">£{(costIncludesVat ? calculation.costPrice - calculation.vatPaid : calculation.costPrice).toFixed(2)} + £{calculation.shippingCost.toFixed(2)} + £{calculation.platformFees.toFixed(2)} + £{calculation.vatToPay.toFixed(2)} = £{((costIncludesVat ? calculation.costPrice - calculation.vatPaid : calculation.costPrice) + calculation.shippingCost + calculation.platformFees + calculation.vatToPay).toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between border-t pt-1">
-                      <span className="text-gray-600">Profit:</span>
-                      <span className="font-mono">£{calculation.sellingPrice.toFixed(2)} - £{((costIncludesVat ? calculation.costPrice - calculation.vatPaid : calculation.costPrice) + calculation.shippingCost + calculation.platformFees + calculation.vatToPay).toFixed(2)} = £{calculation.profitAmount.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Margin:</span>
-                      <span className="font-mono">(£{calculation.profitAmount.toFixed(2)} ÷ £{calculation.sellingPrice.toFixed(2)}) × 100 = {calculation.profitMargin.toFixed(2)}%</span>
-                    </div>
+
                   </div>
                 </div>
 
